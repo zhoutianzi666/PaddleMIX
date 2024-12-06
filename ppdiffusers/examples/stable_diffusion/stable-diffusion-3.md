@@ -1,4 +1,8 @@
-本文档详细介绍了stable_diffusion_3模型，**该模型提出了一种基于Rectified Flow（修正流）的新型高分辨率图像合成方法，显著优化了扩散模型的生成能力。研究通过改进时间步长采样策略，强调中间时间步的采样权重，提升了修正流模型在少步采样场景中的表现。核心架构为MM-DiT多模态变换器，**其设计包括独立的文本和图像模态权重，支持模态内外双向信息交互，并结合多层注意力机制和多模态特征融合，以增强对文本的理解及图像生成能力。实验表明，提出的8B参数模型在生成质量（如CLIP、FID得分）及人类偏好评估中均优于主流开源与闭源模型（如SDXL和DALL-E 3）。此外，文章通过大规模实验验证了低验证损失与高生成质量的相关性，并公开了数据、代码和模型权重以促进研究发展。
+本文档详细介绍了 Stable Diffusion 3（SD3）模型的核心架构——MM-DiT多模态变换器，以及在 SD3模型在PaddleMix框架中的使用指南。
+
+**Stable Diffusion 3 引入了一种基于 Rectified Flow（修正流）的创新型高分辨率图像生成方法，显著提升了扩散模型的生成性能。**该研究通过优化时间步长采样策略，强调中间时间步的采样权重，从而增强了修正流模型在少步采样场景下的表现。其核心架构 MM-DiT 多模态变换器采用独立的文本和图像模态权重设计，支持模态内外双向信息交互，并结合多层注意力机制和多模态特征融合，以进一步强化对文本的理解能力和图像生成效果。
+
+
 
 # **1.MM-DiT多模态变换器**
 
@@ -76,7 +80,7 @@ MM-DiT 通过模块化设计实现了灵活性：
 - 可自由选择使用不同的文本编码器（ T5 或 CLIP），根据场景需求调整模型的推理效率和性能。
 - 支持高分辨率图像的生成，分辨率从 256×256 扩展到 1024×1024 时仍能保持稳定的生成性能。
 
-# **2.环境配置**
+## **2.环境配置**
 
 首先，确保您的系统已安装PaddlePaddle框架。您可以通过以下命令安装PPDiffusers：
 
@@ -89,7 +93,7 @@ MM-DiT 通过模块化设计实现了灵活性：
 
 ```
 
-# **3.快速开始：生成您的第一幅图像**
+## **3.快速开始：生成您的第一幅图像**
 
 安装完成后，您可以执行如下python文件生成一幅图像，内容如下：
 
@@ -118,180 +122,260 @@ show_image("text_to_image_generation-stable_diffusion_3-result.png")
 
 ```
 
-# **4.高性能推理：加速您的创作过程**
+详细内容请参考以下链接：
+
+https://github.com/PaddlePaddle/PaddleMIX/blob/develop/ppdiffusers/examples/inference/text_to_image_generation-stable_diffusion_3.py
+
+## **4.高性能推理**
 
 PPDiffusers支持Stable Diffusion 3高性能推理，推理性能提升70%+。
 
-### 4.1 环境准备
+### 环境准备
 
-```
+```shell
 # 安装 triton并适配paddle
-!python -m pip install triton
-# 如果网络不稳定失败，请重新运行
-!python -m pip install git+https://github.com/zhoutianzi666/UseTritonInPaddle.git
-# !python -m pip install --no-index UseTritonInPaddle-main
-!python -c "import use_triton_in_paddle; use_triton_in_paddle.make_triton_compatible_with_paddle()"
+python -m pip install triton
+python -m pip install git+https://github.com/zhoutianzi666/UseTritonInPaddle.git
+python -c "import use_triton_in_paddle; use_triton_in_paddle.make_triton_compatible_with_paddle()"
 
 # 安装develop版本的paddle，请根据自己的cuda版本选择对应的paddle版本，这里选择12.3的cuda版本
-!pip uninstall -y paddlepaddle-gpu
-!python -m pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/cu118/
+python -m pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/cu123/
 
-# 安装paddlemix
-# 如果网络不稳定失败，请重新运行
-!git clone --depth 1 -b develop https://github.com/PaddlePaddle/PaddleMIX.git
-%cd ~/PaddleMIX
-!pip install -r requirements.txt
-!pip install --user -e .
-%cd ~
+# 安装paddlemix库,使用集成在paddlemix库中的自定义算子。
+python -m pip install paddlemix
 
+# 指定 libCutlassGemmEpilogue.so 的路径
+# 详情请参考 https://github.com/PaddlePaddle/Paddle/blob/develop/paddle/phi/kernels/fusion/cutlass/gemm_epilogue/README.md
+export LD_LIBRARY_PATH=/your_dir/Paddle/paddle/phi/kernels/fusion/cutlass/gemm_epilogue/build:$LD_LIBRARY_PATH
+- 请注意，该项用于在静态图推理时利用Cutlass融合算子提升推理性能，但是并不是必须项。
+如果不使用Cutlass可以将`./text_to_image_generation-stable_diffusion_3.py`中的`exp_enable_use_cutlass`设为False。
+-
 ```
 
-### 4.2 高性能推理代码：
+### 高性能推理指令：
 
-可通执行如下python文件进行高性能推理，具体代码如下：
+```shell
+# 执行FP16推理
+python  text_to_image_generation-stable_diffusion_3.py  --dtype float16 --height 512 --width 512 \
+--num-inference-steps 50 --inference_optimize 1  \
+--benchmark 1
+```
+注：--inference_optimize 1 用于开启推理优化，--benchmark 1 用于开启性能测试。
 
+详细内容请参考以下链接：
+
+https://github.com/PaddlePaddle/PaddleMIX/tree/develop/ppdiffusers/deploy/sd3
+
+## **5.Paddle Stable Diffusion 3 模型多卡推理：**
+
+### Data Parallel 实现原理
+- 在SD3中，对于输入是一个prompt时，使用CFG需要同时进行unconditional guide和text guide的生成，此时 MM-DiT-blocks 的输入batch_size=2；
+所以我们考虑在多卡并行的方案中，将batch为2的输入拆分到两张卡上进行计算，这样单卡的计算量就减少为原来的一半，降低了单卡所承载的浮点计算量。
+计算完成后，我们再把两张卡的计算结果聚合在一起，结果与单卡计算完全一致。
+
+### Model parallel 实现原理
+- 在SD3中,在Linear和Attnetion中有大量的GEMM（General Matrix Multiply），当生成高分辨率图像时，GEMM的计算量以及模型的预训练权重大小都呈线性递增。
+因此，我们考虑在多卡并行方案中，将模型的这些GEMM拆分到两张卡上进行计算，这样单卡的计算量和权重大小就都减少为原来的一半，不仅降低了单卡所承载的浮点计算量，也降低了单卡的显存占用。
+
+### 开启多卡推理方法
+- Paddle Inference 提供了SD3模型的多卡推理功能，用户可以通过设置 `mp_size 2` 来开启Model Parallel，使用 `dp_size 2`来开启Data Parallel。
+使用 `python -m paddle.distributed.launch --gpus “0,1,2,3”` 指定使用哪些卡进行推理，其中`--gpus “0,1,2,3”`即为启用的GPU卡号。
+如果只需使用两卡推理，则只需指定两卡即可，如 `python -m paddle.distributed.launch --gpus “0,1”`。同时需要指定使用的并行方法及并行度，如 `mp_size 2` 或者 `dp_size 2`。
+
+- 注意，这里的`mp_size`需要设定为不大于输入的batch_size个，且`mp_size`和`dp_size`的和不能超过机器总卡数。
+- 高性能多卡推理指令：
+
+```shell
+# 执行多卡推理指令
+python -m paddle.distributed.launch --gpus "0,1,2,3" text_to_image_generation-stable_diffusion_3.py \
+--dtype float16 \
+--height 1024 \
+--width 1024 \
+--num-inference-steps 20 \
+--inference_optimize 1 \
+--mp_size 2 \
+--dp_size 2 \
+--benchmark 1
+```
+注：--inference_optimize 1 用于开启推理优化，--benchmark 1 用于开启性能测试。
+
+详细内容请参考以下链接：
+
+https://github.com/PaddlePaddle/PaddleMIX/tree/develop/ppdiffusers/deploy/sd3
+
+## **6.DreamBooth微调**
+
+[DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation](https://arxiv.org/abs/2208.12242) 是一种用于个性化文本到图像模型的方法，只需要主题的少量图像（3~5张）即可。
+
+`train_dreambooth_sd3.py` 脚本展示了如何进行DreamBooth全参数微调[Stable Diffusion 3](https://huggingface.co/papers/2403.03206)， `train_dreambooth_lora_sd3.py` 脚本中展示了如何进行DreamBooth LoRA微调。
+
+
+> [!NOTE]  
+> Stable Diffusion 3遵循 [Stability Community 开源协议](https://stability.ai/license)。
+> Community License: Free for research, non-commercial, and commercial use for organisations or individuals with less than $1M annual revenue. You only need a paid Enterprise license if your yearly revenues exceed USD$1M and you use Stability AI models in commercial products or services. Read more: https://stability.ai/license
+
+
+### 6.1 安装依赖
+
+在运行脚本之前，请确保安装了库的训练依赖项：
+
+```bash
+pip install -r requirements_sd3.txt
 ```
 
-import os
-import argparse
-import paddle
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description=" Use PaddleMIX to accelerate the Stable Diffusion3 image generation model."
-    )
-    parser.add_argument(
-        "--benchmark",
-        type=(lambda x: str(x).lower() in ["true", "1", "yes"]),
-        default=False,
-        help="if set to True, measure inference performance",
-    )
-    parser.add_argument(
-        "--inference_optimize",
-        type=(lambda x: str(x).lower() in ["true", "1", "yes"]),
-        default=False,
-        help="If set to True, all optimizations except Triton are enabled.",
-    )
-    parser.add_argument(
-        "--inference_optimize_bp",
-        type=(lambda x: str(x).lower() in ["true", "1", "yes"]),
-        default=False,
-        help="If set to True, batch parallel is enabled in DIT and dual-GPU acceleration is used.",
-    )
-    parser.add_argument("--height", type=int, default=512, help="Height of the generated image.")
-    parser.add_argument("--width", type=int, default=512, help="Width of the generated image.")
-    parser.add_argument("--num-inference-steps", type=int, default=50, help="Number of inference steps.")
-    parser.add_argument("--dtype", type=str, default="float32", help="Inference data types.")
-
-    return parser.parse_args()
 
 
-args = parse_args()
+### 示例
+首先需要获取示例数据集。在这个示例中，我们将使用一些狗的图像：https://paddlenlp.bj.bcebos.com/models/community/westfish/develop-sdxl/dog.zip 。
 
-if args.inference_optimize:
-    os.environ["INFERENCE_OPTIMIZE"] = "True"
-    os.environ["INFERENCE_OPTIMIZE_TRITON"] = "True"
-if args.inference_optimize_bp:
-    os.environ["INFERENCE_OPTIMIZE_BP"] = "True"
-if args.dtype == "float32":
-    inference_dtype = paddle.float32
-elif args.dtype == "float16":
-    inference_dtype = paddle.float16
+解压数据集``unzip dog.zip``后，使用以下命令启动训练：
+
+```bash
+export MODEL_NAME="stabilityai/stable-diffusion-3-medium-diffusers"
+export INSTANCE_DIR="dog"
+export OUTPUT_DIR="trained-sd3"
+wandb offline
+```
+
+```bash
+python train_dreambooth_sd3.py \
+  --pretrained_model_name_or_path=$MODEL_NAME  \
+  --instance_data_dir=$INSTANCE_DIR \
+  --output_dir=$OUTPUT_DIR \
+  --mixed_precision="fp16" \
+  --instance_prompt="a photo of sks dog" \
+  --resolution=1024 \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=4 \
+  --learning_rate=1e-4 \
+  --report_to="wandb" \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --max_train_steps=50 \
+  --validation_prompt="A photo of sks dog in a bucket" \
+  --validation_epochs=25 \
+  --seed="0" \
+  --checkpointing_steps=250
+```
+
+fp16训练需要显存67000MiB，为了更好地跟踪我们的训练实验，我们在上面的命令中使用了以下标志：
+
+* `report_to="wandb"` 将确保在 Weights and Biases 上跟踪训练运行。要使用它，请确保安装 `wandb`，使用 `pip install wandb`。
+* `validation_prompt` 和 `validation_epochs` 允许脚本进行几次验证推理运行。这可以让我们定性地检查训练是否按预期进行。
 
 
-if args.inference_optimize_bp:
-    from paddle.distributed import fleet
-    from paddle.distributed.fleet.utils import recompute
-    import numpy as np
-    import random
-    import paddle.distributed as dist
-    import paddle.distributed.fleet as fleet
-    strategy = fleet.DistributedStrategy()
-    model_parallel_size = 2
-    data_parallel_size = 1
-    strategy.hybrid_configs = {
-    "dp_degree": data_parallel_size,
-    "mp_degree": model_parallel_size,
-    "pp_degree": 1
-    }
-    fleet.init(is_collective=True, strategy=strategy)
-    hcg = fleet.get_hybrid_communicate_group()
-    mp_id = hcg.get_model_parallel_rank()
-    rank_id = dist.get_rank()
-
-import datetime
+### 6.2 推理
+训练完成后，我们可以通过以下python脚本执行推理：
+```python
 from ppdiffusers import StableDiffusion3Pipeline
+from ppdiffusers import (
+    AutoencoderKL,
+    StableDiffusion3Pipeline,
+    SD3Transformer2DModel,
+)
+import paddle
 
+transformer_path = "your-checkpoint/transformer"
 
 pipe = StableDiffusion3Pipeline.from_pretrained(
-    "stabilityai/stable-diffusion-3-medium-diffusers",
-    paddle_dtype=inference_dtype,
+    "stabilityai/stable-diffusion-3-medium-diffusers", paddle_dtype=paddle.float16
 )
+transformer = SD3Transformer2DModel.from_pretrained(transformer_path)
 
-pipe.transformer = paddle.incubate.jit.inference(
-    pipe.transformer,
-    save_model_dir="./tmp/sd3",
-    enable_new_ir=True,
-    cache_static_model=True,
-    # V100环境下，需设置exp_enable_use_cutlass=False,
-    exp_enable_use_cutlass=False,
-    delete_pass_lists=["add_norm_fuse_pass"],
-)
-
-generator = paddle.Generator().manual_seed(42)
-prompt = "A cat holding a sign that says hello world"
-
-
-image = pipe(
-    prompt, num_inference_steps=args.num_inference_steps, width=args.width, height=args.height, generator=generator
-).images[0]
-
-if args.benchmark:
-    # warmup
-    for i in range(3):
-        image = pipe(
-            prompt,
-            num_inference_steps=args.num_inference_steps,
-            width=args.width,
-            height=args.height,
-            generator=generator,
-        ).images[0]
-
-    repeat_times = 10
-    sumtime = 0.0
-    for i in range(repeat_times):
-        paddle.device.synchronize()
-        starttime = datetime.datetime.now()
-        image = pipe(
-            prompt,
-            num_inference_steps=args.num_inference_steps,
-            width=args.width,
-            height=args.height,
-            generator=generator,
-        ).images[0]
-        paddle.device.synchronize()
-        endtime = datetime.datetime.now()
-        duringtime = endtime - starttime
-        duringtime = duringtime.seconds * 1000 + duringtime.microseconds / 1000.0
-        sumtime += duringtime
-        print("SD3 end to end time : ", duringtime, "ms")
-
-    print("SD3 ave end to end time : ", sumtime / repeat_times, "ms")
-    cuda_mem_after_used = paddle.device.cuda.max_memory_allocated() / (1024**3)
-    print(f"Max used CUDA memory : {cuda_mem_after_used:.3f} GiB")
-
-if args.inference_optimize_bp:
-    if rank_id == 0:
-        image.save("text_to_image_generation-stable_diffusion_3-result.png")
-else:
-    image.save("text_to_image_generation-stable_diffusion_3-result.png")
+image = pipe("A picture of a sks dog in a bucket", num_inference_steps=25).images[0]
+image.save("sks_dog_dreambooth_finetune.png")
 ```
 
-# **5.个性化定制：使用DreamBooth进行微调**
 
-如果您希望生成特定风格或包含特定元素的图像，可以使用DreamBooth进行模型微调。PPDiffusers提供了相关的示例代码，您可以参考以下链接获取详细信息：
+
+## 6.3 LoRA + DreamBooth
+
+[LoRA](https://huggingface.co/docs/peft/conceptual_guides/adapter#low-rank-adaptation-lora) 是一种流行的节省参数的微调技术，允许您以极少的可学习参数实现全微调的性能。
+
+要使用 LoRA 进行 DreamBooth，运行：
+
+```bash
+export MODEL_NAME="stabilityai/stable-diffusion-3-medium-diffusers"
+export INSTANCE_DIR="dog"
+export OUTPUT_DIR="trained-sd3-lora"
+export USE_PEFT_BACKEND=True
+wandb offline
+
+python train_dreambooth_lora_sd3.py \
+  --pretrained_model_name_or_path=$MODEL_NAME  \
+  --instance_data_dir=$INSTANCE_DIR \
+  --output_dir=$OUTPUT_DIR \
+  --mixed_precision="fp16" \
+  --instance_prompt="a photo of sks dog" \
+  --resolution=512 \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=4 \
+  --learning_rate=5e-5 \
+  --report_to="wandb" \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --max_train_steps=500 \
+  --validation_prompt="A photo of sks dog in a bucket" \
+  --validation_epochs=25 \
+  --seed="0" \
+  --checkpointing_steps=250
+```
+
+fp16训练需要显存47000MiB，。训练完成后，我们可以通过以下python脚本执行推理：
+```python
+from ppdiffusers import StableDiffusion3Pipeline
+from ppdiffusers import (
+    AutoencoderKL,
+    StableDiffusion3Pipeline,
+    SD3Transformer2DModel,
+)
+import paddle
+
+pipe = StableDiffusion3Pipeline.from_pretrained(
+    "stabilityai/stable-diffusion-3-medium-diffusers", paddle_dtype=paddle.float16
+)
+pipe.load_lora_weights('your-lora-checkpoint')
+
+image = pipe("A picture of a sks dog in a bucket", num_inference_steps=25).images[0]
+image.save("sks_dog_dreambooth_lora.png")
+```
+
+## 6.4 NPU硬件训练
+1. 请先参照[PaddleCustomDevice](https://github.com/PaddlePaddle/PaddleCustomDevice/blob/develop/backends/npu/README_cn.md)安装NPU硬件Paddle
+2. 使用NPU进行LoRA训练和推理时参考如下命令设置相应的环境变量，训练和推理运行命令可直接参照上述LoRA训练和推理命令。
+
+使用NPU进行LoRA训练和推理时参考如下命令设置相应的环境变量，训练和推理运行命令可直接参照上述LoRA训练和推理命令。
+```bash
+export FLAGS_npu_storage_format=0
+export FLAGS_use_stride_kernel=0
+export FLAGS_npu_scale_aclnn=True
+export FLAGS_allocator_strategy=auto_growth
+```
+训练(DreamBooth微调)时如果显存不够，可以尝试添加参数(训练完成后不进行评测)`not_validation_final`, 并去除`validation_prompt`，具体命令如下所示
+```
+python train_dreambooth_sd3.py \
+  --pretrained_model_name_or_path=$MODEL_NAME  \
+  --instance_data_dir=$INSTANCE_DIR \
+  --output_dir=$OUTPUT_DIR \
+  --mixed_precision="fp16" \
+  --instance_prompt="a photo of sks dog" \
+  --resolution=1024 \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=4 \
+  --learning_rate=1e-4 \
+  --report_to="wandb" \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --max_train_steps=50 \
+  --validation_epochs=25 \
+  --seed="0" \
+  --checkpointing_steps=250 \
+  --not_validation_final
+```
+详细内容请参考以下链接：
+
 https://github.com/PaddlePaddle/PaddleMIX/blob/develop/ppdiffusers/examples/dreambooth/README_sd3.md
 
-
-# **6.探索更多可能性**
+## **7.探索更多可能性**
 
 通过PaddleMIX的PPDiffusers工具箱，您可以轻松使用SD3模型，开启无限的创意之旅。除了图像生成，PPDiffusers还支持文本引导的图像编辑、图像到图像的转换、文本条件的视频生成等多种任务，您可以根据自己的需求，探索更多的功能和可能性。快来尝试吧，创造属于您的精彩作品！
