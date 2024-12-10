@@ -161,7 +161,7 @@ cd PaddleMIX
 conda create -n paddlemix python=3.10 -y
 conda activate paddlemix
 ```
-### 3. 安装PaddlePaddle
+### 3. ‼️安装PaddlePaddle
 
 #### 方法 1: 一键安装（GPU/CPU推荐）
 
@@ -174,7 +174,7 @@ sh build_paddle_env.sh
 #### 方法 2: 手动安装
 关于PaddlePaddle安装的详细教程请查看[Installation](https://www.paddlepaddle.org.cn/install/quick?docurl=/documentation/docs/zh/develop/install/pip/linux-pip.html)。
 
-### 4. 安装依赖
+### 4. ‼️安装依赖
 
 #### 方法 1: 一键安装（推荐）
 
@@ -192,7 +192,18 @@ cd ppdiffusers
 pip install -e .
 cd ..
 ```
-### 5. 安装自定义算子（可选）
+### 5. ‼️验证安装
+```bash
+sh check_env.sh
+
+环境和依赖推荐版本:
+- paddlepaddle: 3.0.0b2或develop版本
+- paddlenlp: 3.0.0b2
+- ppdiffusers: 0.29.0
+- huggingface_hub: 0.23.0
+```
+
+### 6. 安装自定义算子（可选）
 * 部分模型需要安装自定义算子（FastLayerNorm、FusedLayerNorm），例如EVA-CLIP、DIT_LLAMA等。
 * 非CUDA环境（例如昇腾环境）则跳过
 ```bash
@@ -204,7 +215,7 @@ python setup.py install
 
 **快速开始**
 - [多模态理解：新手入门体验 [示例：InternVL2模型]](paddlemix/examples/internvl2/README.md)
-- [多模态生成：零基础上手指南 [示例：Stable Diffusion模型]](ppdiffusers/examples/inference/README.md)
+- [多模态生成：零基础上手指南 [示例：Stable Diffusion模型]](ppdiffusers/examples/stable_diffusion/README.md)
 - [跨模态任务流水线：快速开始](applications/README.md/#快速开始)
 
 **实操演练&范例**
