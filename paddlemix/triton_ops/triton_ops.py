@@ -53,7 +53,7 @@ def get_cpp_input_from_python_api(func):
     for i in range(len(arg_names)):
         if arg_defaults[i] == None:
             tmp_str += f"paddle::optional<paddle::Tensor> & {arg_names[i]},"
-        elif arg_names[i] in annotations.keys() and annotations[arg_names[i]] == float:
+        elif type(arg_defaults[i]) == float:
             tmp_str += f"float {arg_names[i]},"
         else:
             tmp_str += f"const paddle::Tensor & {arg_names[i]},"
@@ -666,57 +666,6 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
     return out
 
 
-########################### adaptive layer norm ###############################
-fused_adaLN_scale_residual_template = (
-    """
-
-
-std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
-  int M = x.dims()[0] * x.dims()[1];
-  int N = x.dims()[2];
-  int seq_size = x.dims()[1];
-  auto resi_out = paddle::empty(x.shape(), x.dtype(), x.place());
-  auto adaLN_out = paddle::empty(x.shape(), x.dtype(), x.place());
-
-  auto x_ptr = get_tensor_ptr(x);
-  auto mha_out_ptr = get_tensor_ptr(mha_out);
-  auto resi_out_ptr = get_tensor_ptr(resi_out);
-  auto adaLN_out_ptr = get_tensor_ptr(adaLN_out);
-  auto gate_msa_ptr = get_tensor_ptr(gate_msa);
-  auto scale_mlp_ptr = get_tensor_ptr(scale_mlp);
-  auto shift_mlp_ptr = get_tensor_ptr(shift_mlp);
-  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
-  if (weight) {
-    weight_ptr = get_tensor_ptr(*weight);
-  }
-  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
-  if (bias) {
-    bias_ptr = get_tensor_ptr(*bias);
-  }
-  auto  run_stream = adaLN_out.stream();
-"""
-    + tune_and_invoke_part
-    + """
-    return {resi_out, adaLN_out};
-}
-
-std::vector<std::vector<int64_t>> ${op_name}_InferShape(
-        const std::vector<int64_t>& A_shape) {
-  return {A_shape, A_shape};
-}
-
-std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {
-    return {A_dtype, A_dtype};
-}
-
-PD_BUILD_OP(${op_name})
-    .Inputs({"x", "mha_out", "gate_msa", "scale_mlp", "shift_mlp", paddle::Optional("weight"), paddle::Optional("bias")})
-    .Outputs({"resi_out", "adaLN_out"})
-    .Attrs({"epsilon: float"})
-"""
-)
-
-
 @paddle_use_triton(
     key=["M"],
 )
@@ -776,6 +725,57 @@ def fused_adaLN_scale_residual_kernel(
     tl.store(adaLN_out_ptr + all_offs, y, mask=all_mask)
 
 
+########################### adaptive layer norm ###############################
+fused_adaLN_scale_residual_template = (
+    """
+
+
+std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
+
+  ${compute_attr_for_triton_kernel}
+
+  auto resi_out = paddle::empty(x.shape(), x.dtype(), x.place());
+  auto adaLN_out = paddle::empty(x.shape(), x.dtype(), x.place());
+
+  auto x_ptr = get_tensor_ptr(x);
+  auto mha_out_ptr = get_tensor_ptr(mha_out);
+  auto resi_out_ptr = get_tensor_ptr(resi_out);
+  auto adaLN_out_ptr = get_tensor_ptr(adaLN_out);
+  auto gate_msa_ptr = get_tensor_ptr(gate_msa);
+  auto scale_mlp_ptr = get_tensor_ptr(scale_mlp);
+  auto shift_mlp_ptr = get_tensor_ptr(shift_mlp);
+  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
+  if (weight) {
+    weight_ptr = get_tensor_ptr(*weight);
+  }
+  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
+  if (bias) {
+    bias_ptr = get_tensor_ptr(*bias);
+  }
+  auto  run_stream = adaLN_out.stream();
+"""
+    + tune_and_invoke_part
+    + """
+    return {resi_out, adaLN_out};
+}
+
+std::vector<std::vector<int64_t>> ${op_name}_InferShape(
+        const std::vector<int64_t>& A_shape) {
+  return {A_shape, A_shape};
+}
+
+std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {
+    return {A_dtype, A_dtype};
+}
+
+PD_BUILD_OP(${op_name})
+    .Inputs({"x", "mha_out", "gate_msa", "scale_mlp", "shift_mlp", paddle::Optional("weight"), paddle::Optional("bias")})
+    .Outputs({"resi_out", "adaLN_out"})
+    .Attrs({"epsilon: float"})
+"""
+)
+
+
 def fused_adaLN_scale_residual(
     x,
     mha_out,
@@ -784,7 +784,7 @@ def fused_adaLN_scale_residual(
     shift_mlp,
     weight=None,
     bias=None,
-    epsilon: float = 1e-05,
+    epsilon=1e-05,
 ):
     """
     Examples:
@@ -861,7 +861,13 @@ def fused_adaLN_scale_residual(
     N_npo2 = triton.next_power_of_2(N)
 
     input_and_attr = get_cpp_input_from_python_api(fused_adaLN_scale_residual)
-    template_used = SubstituteTemplate(fused_adaLN_scale_residual_template, {"input_and_attr": input_and_attr})
+    compute_attr_for_triton_kernel = "int M = x.dims()[0] * x.dims()[1];\n"
+    compute_attr_for_triton_kernel += "int N = x.dims()[2];\n"
+    compute_attr_for_triton_kernel += "int seq_size = x.dims()[1];\n"
+    template_used = SubstituteTemplate(
+        fused_adaLN_scale_residual_template,
+        {"input_and_attr": input_and_attr, "compute_attr_for_triton_kernel": compute_attr_for_triton_kernel},
+    )
 
     # baseline.
     if os.getenv("INFERENCE_OPTIMIZE_TRITON") is None:
@@ -1032,7 +1038,7 @@ def adaptive_layer_norm_kernel(
         tl.store(y_ptr + cols, y, mask=mask)
 
 
-def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon: float = 1e-05):
+def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
     """
     Examples:
 
@@ -1086,7 +1092,11 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon: float 
     seq_size = x.shape[1]
     BLOCK_SIZE = triton.next_power_of_2(N)
 
+    print(adaptive_layer_norm)
+
     input_and_attr = get_cpp_input_from_python_api(adaptive_layer_norm)
+    print(input_and_attr)
+    # exit(0)
     template_used = SubstituteTemplate(triton_adaptive_layer_norm_template, {"input_and_attr": input_and_attr})
 
     # baseline.
@@ -1223,7 +1233,7 @@ PD_BUILD_OP(${op_name})
 )
 
 
-def rms_norm(x, weight=None, bias=None, epsilon: float = 1e-5):
+def rms_norm(x, weight=None, bias=None, epsilon=1e-5):
     """
     Examples:
 
@@ -1267,7 +1277,6 @@ def rms_norm(x, weight=None, bias=None, epsilon: float = 1e-5):
     M = x.shape[0] * x.shape[1] * x.shape[2]
     N = x.shape[3]
     N_npo2 = triton.next_power_of_2(N)
-
 
     input_and_attr = get_cpp_input_from_python_api(rms_norm)
     compute_attr_for_triton_kernel = "int M = x.dims()[0] * x.dims()[1] * x.dims()[2];\n"
