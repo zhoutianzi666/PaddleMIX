@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import inspect
 import os
 
 import paddle
@@ -43,12 +44,10 @@ from .triton_utils import (
 
 
 def get_cpp_input_from_python_api(func):
-    import inspect
 
     signature = inspect.signature(func)
     arg_names = [v.name for v in signature.parameters.values()]
     arg_defaults = [v.default for v in signature.parameters.values()]
-    annotations = dict(func.__annotations__)
     tmp_str = ""
     for i in range(len(arg_names)):
         if arg_defaults[i] == None:
@@ -70,8 +69,6 @@ class KernelInterface:
     ):
         self.func = func
         self.key_args = key_args
-
-        import inspect
 
         signature = inspect.signature(func)
         self.arg_names = [v.name for v in signature.parameters.values()]
