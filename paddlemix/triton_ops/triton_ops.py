@@ -42,11 +42,29 @@ from .triton_utils import (
 )
 
 
+def get_cpp_input_from_python_api(func):
+    import inspect
+
+    signature = inspect.signature(func)
+    arg_names = [v.name for v in signature.parameters.values()]
+    arg_defaults = [v.default for v in signature.parameters.values()]
+    annotations = dict(func.__annotations__)
+    tmp_str = ""
+    for i in range(len(arg_names)):
+        if arg_defaults[i] == None:
+            tmp_str += f"paddle::optional<paddle::Tensor> & {arg_names[i]},"
+        elif arg_names[i] in annotations.keys() and annotations[arg_names[i]] == float:
+            tmp_str += f"float {arg_names[i]},"
+        else:
+            tmp_str += f"const paddle::Tensor & {arg_names[i]},"
+    tmp_str = tmp_str[:-1]
+    return tmp_str
+
+
 class KernelInterface:
     def __init__(
         self,
         func,
-        custom_op_template,
         other_config,
         key_args=["1"],
     ):
@@ -180,7 +198,7 @@ class KernelInterface:
                 with open(paddle_custom_op_file_path, "w") as f:
                     f.write(
                         SubstituteTemplate(
-                            custom_op_template,
+                            self.custom_op_template,
                             op_dict,
                         )
                     )
@@ -241,42 +259,41 @@ class KernelInterface:
         self.decorator = decorator
 
     def __getitem__(self, op_name_and_grid):
-        assert len(op_name_and_grid) >= 2, "len(op_name_and_grid) must >= 2."
+        assert len(op_name_and_grid) >= 3, "len(op_name_and_grid) must >= 3."
         self.op_name = op_name_and_grid[0]
-        self.grid = op_name_and_grid[1]
-        if len(op_name_and_grid) == 2:
+        custom_op_template = op_name_and_grid[1]
+        self.grid = op_name_and_grid[2]
+        if len(op_name_and_grid) == 3:
             self.tune_config = {}
         else:
-            self.tune_config = op_name_and_grid[2]
+            self.tune_config = op_name_and_grid[3]
+
+        index = custom_op_template.find("PD_BUILD_OP")
+        body = custom_op_template[:index]
+
+        if body.find("${op_name}_InferShape") == -1:
+            body += "std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& A_shape) {return {A_shape};}"
+
+        if body.find("${op_name}_InferDtype") == -1:
+            body += "std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {return {A_dtype};}"
+
+        tail = custom_op_template[index:]
+
+        tail += """
+        .SetKernelFn(PD_KERNEL(${op_name}_func))
+        .SetInferDtypeFn(PD_INFER_DTYPE(${op_name}_InferDtype))
+        .SetInferShapeFn(PD_INFER_SHAPE(${op_name}_InferShape));
+        """
+
+        custom_op_template = paddle_custom_op_head_part + body + tail
+        self.custom_op_template = custom_op_template
+
         return self.decorator
 
 
-def paddle_use_triton(custom_op_template, other_config={}, key=[]):
-
-    index = custom_op_template.find("PD_BUILD_OP")
-
-    body = custom_op_template[:index]
-
-    if body.find("${op_name}_InferShape") == -1:
-        body += "std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& A_shape) {return {A_shape};}"
-
-    if body.find("${op_name}_InferDtype") == -1:
-        body += (
-            "std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {return {A_dtype};}"
-        )
-
-    tail = custom_op_template[index:]
-
-    tail += """
-    .SetKernelFn(PD_KERNEL(${op_name}_func))
-    .SetInferDtypeFn(PD_INFER_DTYPE(${op_name}_InferDtype))
-    .SetInferShapeFn(PD_INFER_SHAPE(${op_name}_InferShape));
-    """
-
-    custom_op_template = paddle_custom_op_head_part + body + tail
-
+def paddle_use_triton(other_config={}, key=[]):
     def decorator(func):
-        return KernelInterface(func, custom_op_template, other_config, key)
+        return KernelInterface(func, other_config, key)
 
     return decorator
 
@@ -373,7 +390,6 @@ wint8_kernel_other_config = {
 
 
 @paddle_use_triton(
-    custom_op_template=triton_wint8_template,
     other_config=wint8_kernel_other_config,
     key=["M", "N", "K"],
 )
@@ -533,7 +549,7 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
     triton_uint_qweight = (triton_qweight.astype("int32") + 128).astype("uint8")
 
     for i in range(100):
-        triton_output = paddlemix.custom_ops.weight_only_int8(
+        triton_output = paddlemix.triton_ops.weight_only_int8(
             activation,
             triton_uint_qweight,
             triton_scale,
@@ -543,7 +559,7 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
 
     starttime = datetime.datetime.now()
     for i in range(100):
-        triton_output = paddlemix.custom_ops.weight_only_int8(
+        triton_output = paddlemix.triton_ops.weight_only_int8(
             activation,
             triton_uint_qweight,
             triton_scale,
@@ -611,7 +627,7 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
             "SPLIT_K",
         )
 
-        wint8_kernel[(op_name, grid, get_wint8_kernel_config())](
+        wint8_kernel[(triton_wint8_template, op_name, grid, get_wint8_kernel_config())](
             x,
             qweight,
             output,
@@ -655,15 +671,7 @@ fused_adaLN_scale_residual_template = (
     """
 
 
-std::vector<paddle::Tensor> ${op_name}_func(
-    const paddle::Tensor &x,
-    const paddle::Tensor &mha_out,
-    const paddle::Tensor &gate_msa,
-    const paddle::Tensor &scale_mlp,
-    const paddle::Tensor &shift_mlp,
-    paddle::optional<paddle::Tensor> &weight,
-    paddle::optional<paddle::Tensor> &bias,
-    float epsilon) {
+std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
   int M = x.dims()[0] * x.dims()[1];
   int N = x.dims()[2];
   int seq_size = x.dims()[1];
@@ -710,7 +718,6 @@ PD_BUILD_OP(${op_name})
 
 
 @paddle_use_triton(
-    custom_op_template=fused_adaLN_scale_residual_template,
     key=["M"],
 )
 def fused_adaLN_scale_residual_kernel(
@@ -777,7 +784,7 @@ def fused_adaLN_scale_residual(
     shift_mlp,
     weight=None,
     bias=None,
-    epsilon=1e-05,
+    epsilon: float = 1e-05,
 ):
     """
     Examples:
@@ -813,7 +820,7 @@ def fused_adaLN_scale_residual(
 
 
     for i in range(100):
-        resi_out_triton, adaLN_out_triton = paddlemix.custom_ops.fused_adaLN_scale_residual(x, mha_out, gate_msa, scale_mlp_x, shift_mlp_x, weight, bias, epsilon)
+        resi_out_triton, adaLN_out_triton = paddlemix.triton_ops.fused_adaLN_scale_residual(x, mha_out, gate_msa, scale_mlp_x, shift_mlp_x, weight, bias, epsilon)
 
     for i in range(100):
         resi_out_paddle, adaLN_out_paddle = paddle_fused_adaLN(x, mha_out, gate_msa, hidd, scale_mlp_x, shift_mlp_x, weight, bias, epsilon)
@@ -853,6 +860,9 @@ def fused_adaLN_scale_residual(
     seq_size = x.shape[1]
     N_npo2 = triton.next_power_of_2(N)
 
+    input_and_attr = get_cpp_input_from_python_api(fused_adaLN_scale_residual)
+    template_used = SubstituteTemplate(fused_adaLN_scale_residual_template, {"input_and_attr": input_and_attr})
+
     # baseline.
     if os.getenv("INFERENCE_OPTIMIZE_TRITON") is None:
         resi_out_paddle = mha_out * gate_msa.unsqueeze(axis=1) + x
@@ -876,7 +886,7 @@ def fused_adaLN_scale_residual(
         resi_out = paddle.empty_like(x)
         adaLN_out = paddle.empty_like(x)
         grid = ("M",)
-        fused_adaLN_scale_residual_kernel[(op_name, grid, fused_adaLN_scale_residual_kernel_config)](
+        fused_adaLN_scale_residual_kernel[(op_name, template_used, grid, fused_adaLN_scale_residual_kernel_config)](
             x,
             mha_out,
             gate_msa,
@@ -937,13 +947,7 @@ def fused_adaLN_scale_residual(
 triton_adaptive_layer_norm_template = (
     """
 
-std::vector<paddle::Tensor> ${op_name}_func(
-    const paddle::Tensor &x,
-    const paddle::Tensor &scale,
-    const paddle::Tensor &shift,
-    paddle::optional<paddle::Tensor> &weight,
-    paddle::optional<paddle::Tensor> &bias,
-    float epsilon) {
+std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
   int M = x.dims()[0] * x.dims()[1];
   int N = x.dims()[2];
   int seq_size = x.dims()[1];
@@ -977,7 +981,6 @@ PD_BUILD_OP(${op_name})
 
 
 @paddle_use_triton(
-    custom_op_template=triton_adaptive_layer_norm_template,
     key=["M"],
 )
 def adaptive_layer_norm_kernel(
@@ -1029,7 +1032,7 @@ def adaptive_layer_norm_kernel(
         tl.store(y_ptr + cols, y, mask=mask)
 
 
-def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
+def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon: float = 1e-05):
     """
     Examples:
 
@@ -1052,7 +1055,7 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
     scale_msa_x = paddle.rand([batch, hidd], dtype=dtype)
 
     for i in range(100):
-        mt_result = paddlemix.custom_ops.adaptive_layer_norm(x, scale_msa_x, shift_msa_x, weight, bias)
+        mt_result = paddlemix.triton_ops.adaptive_layer_norm(x, scale_msa_x, shift_msa_x, weight, bias)
 
     for i in range(100):
         baseline = modulate(paddle.nn.functional.layer_norm(x, [hidd], weight, bias, 1e-5), shift_msa_x, scale_msa_x)
@@ -1083,6 +1086,9 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
     seq_size = x.shape[1]
     BLOCK_SIZE = triton.next_power_of_2(N)
 
+    input_and_attr = get_cpp_input_from_python_api(adaptive_layer_norm)
+    template_used = SubstituteTemplate(triton_adaptive_layer_norm_template, {"input_and_attr": input_and_attr})
+
     # baseline.
     if os.getenv("INFERENCE_OPTIMIZE_TRITON") is None:
         norm_hidden_states = paddle.nn.functional.layer_norm(x, [N], weight, bias, epsilon)
@@ -1104,7 +1110,7 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
     if op_name not in OpProtoHolder.instance().op_proto_map.keys():
         y = paddle.empty_like(x)
         grid = ("M",)
-        adaptive_layer_norm_kernel[(op_name, grid, adaptive_layer_norm_kernel_config)](
+        adaptive_layer_norm_kernel[(op_name, template_used, grid, adaptive_layer_norm_kernel_config)](
             x,
             y,
             y,
@@ -1144,45 +1150,7 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
         return out
 
 
-rms_norm_template = (
-    """
-
-std::vector<paddle::Tensor> ${op_name}_func(
-    const paddle::Tensor &x,
-    paddle::optional<paddle::Tensor> &weight,
-    paddle::optional<paddle::Tensor> &bias,
-    float epsilon) {
-  int M = x.dims()[0] * x.dims()[1] * x.dims()[2];
-  int N = x.dims()[3];
-  auto y = paddle::empty(x.shape(), x.dtype(), x.place());
-
-  auto x_ptr = get_tensor_ptr(x);
-  auto y_ptr = get_tensor_ptr(y);
-  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
-  if (weight) {
-    weight_ptr = get_tensor_ptr(*weight);
-  }
-  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
-  if (bias) {
-    bias_ptr = get_tensor_ptr(*bias);
-  }
-  auto run_stream = y.stream();
-"""
-    + tune_and_invoke_part
-    + """
-    return {y};
-}
-
-PD_BUILD_OP(${op_name})
-    .Inputs({"x", paddle::Optional("weight"), paddle::Optional("bias")})
-    .Outputs({"out"})
-    .Attrs({"epsilon: float"})
-"""
-)
-
-
 @paddle_use_triton(
-    custom_op_template=rms_norm_template,
     key=["M"],
 )
 def rms_norm_kernel(
@@ -1222,7 +1190,40 @@ def rms_norm_kernel(
     tl.store(y_ptr + all_offs, resi_hat, mask=offs_an[None, :] < N)
 
 
-def rms_norm(x, weight=None, bias=None, epsilon=1e-05):
+rms_norm_template = (
+    """
+std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
+
+  ${compute_attr_for_triton_kernel}
+
+  auto y = paddle::empty(x.shape(), x.dtype(), x.place());
+
+  auto x_ptr = get_tensor_ptr(x);
+  auto y_ptr = get_tensor_ptr(y);
+  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
+  if (weight) {
+    weight_ptr = get_tensor_ptr(*weight);
+  }
+  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
+  if (bias) {
+    bias_ptr = get_tensor_ptr(*bias);
+  }
+  auto run_stream = y.stream();
+"""
+    + tune_and_invoke_part
+    + """
+    return {y};
+}
+
+PD_BUILD_OP(${op_name})
+    .Inputs({"x", paddle::Optional("weight"), paddle::Optional("bias")})
+    .Outputs({"y"})
+    .Attrs({"epsilon: float"})
+"""
+)
+
+
+def rms_norm(x, weight=None, bias=None, epsilon: float = 1e-5):
     """
     Examples:
 
@@ -1243,7 +1244,7 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-05):
         baseline = paddle.incubate.nn.functional.fused_rms_norm(x, weight, bias, 1e-5, begin_norm_axis=3)
 
     for i in range(100):
-        mt_result = paddlemix.custom_ops.rms_norm(x,weight,bias,1e-5)
+        mt_result = paddlemix.triton_ops.rms_norm(x,weight,bias,1e-5)
 
 
     baseline = baseline[0]
@@ -1265,6 +1266,15 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-05):
 
     M = x.shape[0] * x.shape[1] * x.shape[2]
     N = x.shape[3]
+
+    input_and_attr = get_cpp_input_from_python_api(rms_norm)
+    compute_attr_for_triton_kernel = "int M = x.dims()[0] * x.dims()[1] * x.dims()[2];\n"
+    compute_attr_for_triton_kernel += "int N = x.dims()[3];\n"
+    template_used = SubstituteTemplate(
+        rms_norm_template,
+        {"input_and_attr": input_and_attr, "compute_attr_for_triton_kernel": compute_attr_for_triton_kernel},
+    )
+
     N_npo2 = triton.next_power_of_2(N)
 
     op_name = "triton_rms_norm"
@@ -1280,14 +1290,14 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-05):
     if op_name not in OpProtoHolder.instance().op_proto_map.keys():
         y = paddle.empty_like(x)
         grid = ("((M+BLOCK_SIZE_M-1)/BLOCK_SIZE_M)",)
-        rms_norm_kernel[(op_name, grid, rms_norm_kernel_config)](
-            x,
-            y,
-            weight,
-            x,
-            -1,  # M,
-            N,
-            epsilon,
+        rms_norm_kernel[(op_name, template_used, grid, rms_norm_kernel_config)](
+            x_ptr=x,
+            y_ptr=y,
+            weight_ptr=weight,
+            bias_ptr=x,
+            M=-1,
+            N=N,
+            epsilon=epsilon,
             N_npo2=N_npo2,
             weight_attr=weight_attr,
             bias_attr=bias_attr,
@@ -1305,16 +1315,16 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-05):
             "weight@OPTIONAL": weight,
             "bias@OPTIONAL": bias,
         }
-        out = helper.create_variable_for_type_inference(dtype=x.dtype)
+        y = helper.create_variable_for_type_inference(dtype=x.dtype)
         helper.append_op(
             type=op_name,
             inputs=inputs,
             attrs={
                 "epsilon": epsilon,
             },
-            outputs={"out": out},
+            outputs={"y": y},
         )
-        return out
+        return y
 
 
 fused_rotary_emb_template = (
@@ -1385,7 +1395,6 @@ PD_BUILD_OP(${op_name})
 
 
 @paddle_use_triton(
-    custom_op_template=fused_rotary_emb_template,
     key=["M"],
 )
 def fused_rotary_emb_kernel(
@@ -1513,7 +1522,7 @@ def fused_rotary_emb(
         k_out_tensor = paddle.empty([BSZ, SEQ_LEN, NUM_HEAD, HEAD_DIM], dtype=empty_dtype).astype(dtype_)
         v_out_tensor = paddle.empty([BSZ, SEQ_LEN, NUM_HEAD, HEAD_DIM], dtype=empty_dtype).astype(dtype_)
         grid = ("M",)
-        fused_rotary_emb_kernel[(op_name, grid, fused_rotary_emb_kernel_config)](
+        fused_rotary_emb_kernel[(op_name, fused_rotary_emb_template, grid, fused_rotary_emb_kernel_config)](
             x,
             q_out_tensor,
             k_out_tensor,
@@ -1628,7 +1637,6 @@ PD_BUILD_OP(${op_name})
 
 
 @paddle_use_triton(
-    custom_op_template=split_concat_template,
     key=["1"],
 )
 def split_concat_kernel(
@@ -1703,7 +1711,7 @@ def split_concat(x, y):
         out2 = paddle.empty(shape=[batch, seq_qkv + seq_eqkv, ouput_hidden], dtype=x.dtype)
         grid = ("3", "batch", "seq_qkv + seq_eqkv")
         # -1 means this value does not matter for triton compilation
-        split_concat_kernel[(op_name, grid)](
+        split_concat_kernel[(op_name, split_concat_template, grid)](
             out0, out1, out2, x, y, -1, seq_qkv, seq_eqkv, ouput_hidden, BLOCK_SIZE=BLOCK_SIZE  # batch,
         )
 
@@ -1785,7 +1793,6 @@ PD_BUILD_OP(${op_name})
 
 
 @paddle_use_triton(
-    custom_op_template=triton_split_template,
     key=["1"],
 )
 def triton_split_kernel(
@@ -1831,7 +1838,7 @@ def triton_split(x, num_or_sections=[-1, -1], axis=1):
         out1 = paddle.empty(shape=[output_batch, output_seq1, output_hidden], dtype=x.dtype)
         grid = ("output_batch", "output_seq0+output_seq1")
 
-        triton_split_kernel[(op_name, grid)](
+        triton_split_kernel[(op_name, triton_split_template, grid)](
             out0, out1, x, output_seq0, output_seq1, output_batch, output_hidden, BLOCK_SIZE=2048
         )
 
