@@ -1266,6 +1266,8 @@ def rms_norm(x, weight=None, bias=None, epsilon: float = 1e-5):
 
     M = x.shape[0] * x.shape[1] * x.shape[2]
     N = x.shape[3]
+    N_npo2 = triton.next_power_of_2(N)
+
 
     input_and_attr = get_cpp_input_from_python_api(rms_norm)
     compute_attr_for_triton_kernel = "int M = x.dims()[0] * x.dims()[1] * x.dims()[2];\n"
@@ -1274,8 +1276,6 @@ def rms_norm(x, weight=None, bias=None, epsilon: float = 1e-5):
         rms_norm_template,
         {"input_and_attr": input_and_attr, "compute_attr_for_triton_kernel": compute_attr_for_triton_kernel},
     )
-
-    N_npo2 = triton.next_power_of_2(N)
 
     op_name = "triton_rms_norm"
     op_name += get_dtype_str(x.dtype)
