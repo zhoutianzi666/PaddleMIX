@@ -113,9 +113,7 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-5):
     int N = x.dims()[3];
     """
 
-    op_name = "triton_rms_norm"
-    op_name += get_dtype_str(x.dtype)
-    op_name += f"_{N_npo2}"
+    op_name = f"triton_rms_norm_{get_dtype_str(x.dtype)}_{N_npo2}"
 
     rms_norm_kernel_config = []
     if N_npo2 <= 64:
@@ -168,9 +166,7 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-5):
         helper.append_op(
             type=op_name,
             inputs=inputs,
-            attrs={
-                "epsilon": epsilon,
-            },
+            attrs={"epsilon": epsilon},
             outputs={"y": y},
         )
         return y

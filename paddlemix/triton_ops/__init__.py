@@ -23,13 +23,13 @@ try:
         paddle_use_triton,
         split_concat,
         triton_split,
-        weight_only_int8,
     )
     from .triton_utils import (
         get_dtype_str,
         paddle_custom_op_head_part,
         tune_and_invoke_part,
     )
+    from .wint8 import weight_only_int8
 
     __all__ += [
         "paddle_custom_op_head_part",
