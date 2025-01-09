@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import os
 import re
 import sys
@@ -354,3 +355,94 @@ tune_and_invoke_part = """
     assert(status == CUDA_SUCCESS);
   }
 """
+
+
+common_template = (
+    """
+std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
+  ${prepare_attr_for_triton_kernel}
+  ${prepare_ptr_for_triton_kernel}
+  auto  run_stream = ${arbitary_output_name}.stream();
+  """
+    + tune_and_invoke_part
+    + """
+  return {${return_tensor_names}};
+}
+
+
+${d2s_infer_shape_dtype_part}
+
+PD_BUILD_OP(${op_name})
+    .Inputs({${paddle_input_sig}})
+    .Outputs({${paddle_output_sig}})
+    .Attrs({${paddle_attr_sig}})
+    .SetKernelFn(PD_KERNEL(${op_name}_func))
+    .SetInferDtypeFn(PD_INFER_DTYPE(${op_name}_InferDtype))
+    .SetInferShapeFn(PD_INFER_SHAPE(${op_name}_InferShape));
+"""
+)
+
+
+def rendering_common_template(
+    func,
+    prepare_attr_for_triton_kernel,
+    prepare_ptr_for_triton_kernel,
+    return_tensor_names,
+    d2s_infer_shape_dtype_part=None,
+):
+    signature = inspect.signature(func)
+    arg_names = [v.name for v in signature.parameters.values()]
+    arg_defaults = [v.default for v in signature.parameters.values()]
+    input_and_attr = ""
+    paddle_input_sig = ""
+    paddle_attr_sig = ""
+
+    for i in range(len(arg_names)):
+        if arg_defaults[i] == None:
+            input_and_attr += f"paddle::optional<paddle::Tensor> & {arg_names[i]},"
+            paddle_input_sig += f"""paddle::Optional("{arg_names[i]}"),"""
+        elif type(arg_defaults[i]) == float:
+            input_and_attr += f"float {arg_names[i]},"
+            paddle_attr_sig += f""""{arg_names[i]}: float","""
+        else:
+            input_and_attr += f"const paddle::Tensor & {arg_names[i]},"
+            paddle_input_sig += f""""{arg_names[i]}","""
+    input_and_attr = input_and_attr[:-1]
+    paddle_input_sig = paddle_input_sig[:-1]
+    if len(paddle_attr_sig) > 1:
+        paddle_attr_sig = paddle_attr_sig[:-1]
+
+    paddle_output_sig = ""
+    arbitary_output_name = ""
+    for name in return_tensor_names.split(","):
+        name = name.strip()
+        arbitary_output_name = name
+        paddle_output_sig += f""""{name}","""
+    paddle_output_sig = paddle_output_sig[:-1]
+
+    if d2s_infer_shape_dtype_part is None:
+        d2s_infer_shape_dtype_part = """
+        std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& A_shape) {return {${tmp1}};}
+        std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {return {${tmp2}};}
+        """
+        tmp1 = ",".join(["A_shape"] * len(return_tensor_names.split(",")))
+        tmp2 = ",".join(["A_dtype"] * len(return_tensor_names.split(",")))
+        tmp_dict = {"tmp1": tmp1, "tmp2": tmp2}
+        d2s_infer_shape_dtype_part = SubstituteTemplate(d2s_infer_shape_dtype_part, tmp_dict)
+
+    result_str = SubstituteTemplate(
+        common_template,
+        {
+            "input_and_attr": input_and_attr,
+            "prepare_attr_for_triton_kernel": prepare_attr_for_triton_kernel,
+            "prepare_ptr_for_triton_kernel": prepare_ptr_for_triton_kernel,
+            "return_tensor_names": return_tensor_names,
+            "arbitary_output_name": arbitary_output_name,
+            "d2s_infer_shape_dtype_part": d2s_infer_shape_dtype_part,
+            "paddle_input_sig": paddle_input_sig,
+            "paddle_output_sig": paddle_output_sig,
+            "paddle_attr_sig": paddle_attr_sig,
+        },
+    )
+
+    return paddle_custom_op_head_part + result_str

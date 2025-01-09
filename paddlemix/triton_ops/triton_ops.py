@@ -36,28 +36,11 @@ from .triton_utils import (
     get_value_hint,
     link_file,
     multi_process_do,
-    paddle_custom_op_head_part,
     python_path,
     rename_c_to_cu,
+    rendering_common_template,
     tune_and_invoke_part,
 )
-
-
-def get_cpp_input_from_python_api(func):
-
-    signature = inspect.signature(func)
-    arg_names = [v.name for v in signature.parameters.values()]
-    arg_defaults = [v.default for v in signature.parameters.values()]
-    tmp_str = ""
-    for i in range(len(arg_names)):
-        if arg_defaults[i] == None:
-            tmp_str += f"paddle::optional<paddle::Tensor> & {arg_names[i]},"
-        elif type(arg_defaults[i]) == float:
-            tmp_str += f"float {arg_names[i]},"
-        else:
-            tmp_str += f"const paddle::Tensor & {arg_names[i]},"
-    tmp_str = tmp_str[:-1]
-    return tmp_str
 
 
 class KernelInterface:
@@ -258,32 +241,12 @@ class KernelInterface:
     def __getitem__(self, op_name_and_grid):
         assert len(op_name_and_grid) >= 3, "len(op_name_and_grid) must >= 3."
         self.op_name = op_name_and_grid[0]
-        custom_op_template = op_name_and_grid[1]
+        self.custom_op_template = op_name_and_grid[1]
         self.grid = op_name_and_grid[2]
         if len(op_name_and_grid) == 3:
             self.tune_config = {}
         else:
             self.tune_config = op_name_and_grid[3]
-
-        index = custom_op_template.find("PD_BUILD_OP")
-        body = custom_op_template[:index]
-
-        if body.find("${op_name}_InferShape") == -1:
-            body += "std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& A_shape) {return {A_shape};}"
-
-        if body.find("${op_name}_InferDtype") == -1:
-            body += "std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {return {A_dtype};}"
-
-        tail = custom_op_template[index:]
-
-        tail += """
-        .SetKernelFn(PD_KERNEL(${op_name}_func))
-        .SetInferDtypeFn(PD_INFER_DTYPE(${op_name}_InferDtype))
-        .SetInferShapeFn(PD_INFER_SHAPE(${op_name}_InferShape));
-        """
-
-        custom_op_template = paddle_custom_op_head_part + body + tail
-        self.custom_op_template = custom_op_template
 
         return self.decorator
 
@@ -722,57 +685,6 @@ def fused_adaLN_scale_residual_kernel(
     tl.store(adaLN_out_ptr + all_offs, y, mask=all_mask)
 
 
-########################### adaptive layer norm ###############################
-fused_adaLN_scale_residual_template = (
-    """
-
-
-std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
-
-  ${compute_attr_for_triton_kernel}
-
-  auto resi_out = paddle::empty(x.shape(), x.dtype(), x.place());
-  auto adaLN_out = paddle::empty(x.shape(), x.dtype(), x.place());
-
-  auto x_ptr = get_tensor_ptr(x);
-  auto mha_out_ptr = get_tensor_ptr(mha_out);
-  auto resi_out_ptr = get_tensor_ptr(resi_out);
-  auto adaLN_out_ptr = get_tensor_ptr(adaLN_out);
-  auto gate_msa_ptr = get_tensor_ptr(gate_msa);
-  auto scale_mlp_ptr = get_tensor_ptr(scale_mlp);
-  auto shift_mlp_ptr = get_tensor_ptr(shift_mlp);
-  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
-  if (weight) {
-    weight_ptr = get_tensor_ptr(*weight);
-  }
-  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
-  if (bias) {
-    bias_ptr = get_tensor_ptr(*bias);
-  }
-  auto  run_stream = adaLN_out.stream();
-"""
-    + tune_and_invoke_part
-    + """
-    return {resi_out, adaLN_out};
-}
-
-std::vector<std::vector<int64_t>> ${op_name}_InferShape(
-        const std::vector<int64_t>& A_shape) {
-  return {A_shape, A_shape};
-}
-
-std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {
-    return {A_dtype, A_dtype};
-}
-
-PD_BUILD_OP(${op_name})
-    .Inputs({"x", "mha_out", "gate_msa", "scale_mlp", "shift_mlp", paddle::Optional("weight"), paddle::Optional("bias")})
-    .Outputs({"resi_out", "adaLN_out"})
-    .Attrs({"epsilon: float"})
-"""
-)
-
-
 def fused_adaLN_scale_residual(
     x,
     mha_out,
@@ -857,14 +769,11 @@ def fused_adaLN_scale_residual(
     seq_size = x.shape[1]
     N_npo2 = triton.next_power_of_2(N)
 
-    input_and_attr = get_cpp_input_from_python_api(fused_adaLN_scale_residual)
-    compute_attr_for_triton_kernel = "int M = x.dims()[0] * x.dims()[1];\n"
-    compute_attr_for_triton_kernel += "int N = x.dims()[2];\n"
-    compute_attr_for_triton_kernel += "int seq_size = x.dims()[1];\n"
-    template_used = SubstituteTemplate(
-        fused_adaLN_scale_residual_template,
-        {"input_and_attr": input_and_attr, "compute_attr_for_triton_kernel": compute_attr_for_triton_kernel},
-    )
+    prepare_attr_for_triton_kernel = """
+    int M = x.dims()[0] * x.dims()[1];
+    int N = x.dims()[2];
+    int seq_size = x.dims()[1];
+    """
 
     # baseline.
     if os.getenv("INFERENCE_OPTIMIZE_TRITON") is None:
@@ -888,21 +797,46 @@ def fused_adaLN_scale_residual(
     if op_name not in OpProtoHolder.instance().op_proto_map.keys():
         resi_out = paddle.empty_like(x)
         adaLN_out = paddle.empty_like(x)
+        prepare_ptr_for_triton_kernel = """
+        auto resi_out = paddle::empty(x.shape(), x.dtype(), x.place());
+        auto adaLN_out = paddle::empty(x.shape(), x.dtype(), x.place());
+
+        auto x_ptr = get_tensor_ptr(x);
+        auto mha_out_ptr = get_tensor_ptr(mha_out);
+        auto resi_out_ptr = get_tensor_ptr(resi_out);
+        auto adaLN_out_ptr = get_tensor_ptr(adaLN_out);
+        auto gate_msa_ptr = get_tensor_ptr(gate_msa);
+        auto scale_mlp_ptr = get_tensor_ptr(scale_mlp);
+        auto shift_mlp_ptr = get_tensor_ptr(shift_mlp);
+        CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
+        if (weight) weight_ptr = get_tensor_ptr(*weight);
+        CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
+        if (bias) bias_ptr = get_tensor_ptr(*bias);
+        """
+
+        return_tensor_names = "resi_out, adaLN_out"
+        template_used = rendering_common_template(
+            fused_adaLN_scale_residual,
+            prepare_attr_for_triton_kernel,
+            prepare_ptr_for_triton_kernel,
+            return_tensor_names,
+        )
+
         grid = ("M",)
         fused_adaLN_scale_residual_kernel[(op_name, template_used, grid, fused_adaLN_scale_residual_kernel_config)](
-            x,
-            mha_out,
-            gate_msa,
-            scale_mlp,
-            shift_mlp,
-            shift_mlp,
-            shift_mlp,
-            resi_out,
-            adaLN_out,
-            -1,
-            N,
-            -1,
-            epsilon,
+            x_ptr=x,
+            mha_out_ptr=mha_out,
+            gate_msa_ptr=gate_msa,
+            scale_mlp_ptr=scale_mlp,
+            shift_mlp_ptr=shift_mlp,
+            weight_ptr=shift_mlp,
+            bias_ptr=shift_mlp,
+            resi_out_ptr=resi_out,
+            adaLN_out_ptr=adaLN_out,
+            M=-1,
+            N=N,
+            seq_size=-1,
+            epsilon=epsilon,
             N_npo2=N_npo2,
             weight_attr=weight_attr,
             bias_attr=bias_attr,
@@ -945,42 +879,6 @@ def fused_adaLN_scale_residual(
             outputs={"resi_out": resi_out, "adaLN_out": adaLN_out},
         )
         return resi_out, adaLN_out
-
-
-triton_adaptive_layer_norm_template = (
-    """
-
-std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
-  int M = x.dims()[0] * x.dims()[1];
-  int N = x.dims()[2];
-  int seq_size = x.dims()[1];
-  auto y = paddle::empty(x.shape(), x.dtype(), x.place());
-
-  auto x_ptr = get_tensor_ptr(x);
-  auto y_ptr = get_tensor_ptr(y);
-  auto scale_ptr = get_tensor_ptr(scale);
-  auto shift_ptr = get_tensor_ptr(shift);
-  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
-  if (weight) {
-    weight_ptr = get_tensor_ptr(*weight);
-  }
-  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
-  if (bias) {
-    bias_ptr = get_tensor_ptr(*bias);
-  }
-  auto run_stream = y.stream();
-"""
-    + tune_and_invoke_part
-    + """
-  return {y};
-}
-
-PD_BUILD_OP(${op_name})
-    .Inputs({"x", "scale", "shift", paddle::Optional("weight"), paddle::Optional("bias")})
-    .Outputs({"out"})
-    .Attrs({"epsilon: float"})
-"""
-)
 
 
 @paddle_use_triton(
@@ -1089,12 +987,11 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
     seq_size = x.shape[1]
     BLOCK_SIZE = triton.next_power_of_2(N)
 
-    print(adaptive_layer_norm)
-
-    input_and_attr = get_cpp_input_from_python_api(adaptive_layer_norm)
-    print(input_and_attr)
-    # exit(0)
-    template_used = SubstituteTemplate(triton_adaptive_layer_norm_template, {"input_and_attr": input_and_attr})
+    prepare_attr_for_triton_kernel = """
+    int M = x.dims()[0] * x.dims()[1];
+    int N = x.dims()[2];
+    int seq_size = x.dims()[1];
+    """
 
     # baseline.
     if os.getenv("INFERENCE_OPTIMIZE_TRITON") is None:
@@ -1116,18 +1013,34 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
 
     if op_name not in OpProtoHolder.instance().op_proto_map.keys():
         y = paddle.empty_like(x)
+        prepare_ptr_for_triton_kernel = """
+        auto y = paddle::empty(x.shape(), x.dtype(), x.place());
+        auto x_ptr = get_tensor_ptr(x);
+        auto y_ptr = get_tensor_ptr(y);
+        auto scale_ptr = get_tensor_ptr(scale);
+        auto shift_ptr = get_tensor_ptr(shift);
+        CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
+        if (weight) weight_ptr = get_tensor_ptr(*weight);
+        CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
+        if (bias) bias_ptr = get_tensor_ptr(*bias);
+        """
+        return_tensor_names = "y"
+        template_used = rendering_common_template(
+            adaptive_layer_norm, prepare_attr_for_triton_kernel, prepare_ptr_for_triton_kernel, return_tensor_names
+        )
+
         grid = ("M",)
         adaptive_layer_norm_kernel[(op_name, template_used, grid, adaptive_layer_norm_kernel_config)](
-            x,
-            y,
-            y,
-            y,
-            y,
-            y,
-            -1,
-            N,
-            -1,
-            epsilon,
+            x_ptr=x,
+            y_ptr=y,
+            weight_ptr=y,
+            bias_ptr=y,
+            scale_ptr=y,
+            shift_ptr=y,
+            M=-1,
+            N=N,
+            seq_size=-1,
+            epsilon=epsilon,
             BLOCK_SIZE=BLOCK_SIZE,
             weight_attr=weight_attr,
             bias_attr=bias_attr,
@@ -1145,16 +1058,16 @@ def adaptive_layer_norm(x, scale, shift, weight=None, bias=None, epsilon=1e-05):
             "weight@OPTIONAL": weight,
             "bias@OPTIONAL": bias,
         }
-        out = helper.create_variable_for_type_inference(dtype=x.dtype)
+        y = helper.create_variable_for_type_inference(dtype=x.dtype)
         helper.append_op(
             type=op_name,
             inputs=inputs,
             attrs={
                 "epsilon": epsilon,
             },
-            outputs={"out": out},
+            outputs={"y": y},
         )
-        return out
+        return y
 
 
 @paddle_use_triton(
@@ -1195,39 +1108,6 @@ def rms_norm_kernel(
         resi_hat = resi_hat + bias
 
     tl.store(y_ptr + all_offs, resi_hat, mask=offs_an[None, :] < N)
-
-
-rms_norm_template = (
-    """
-std::vector<paddle::Tensor> ${op_name}_func(${input_and_attr}) {
-
-  ${compute_attr_for_triton_kernel}
-
-  auto y = paddle::empty(x.shape(), x.dtype(), x.place());
-
-  auto x_ptr = get_tensor_ptr(x);
-  auto y_ptr = get_tensor_ptr(y);
-  CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
-  if (weight) {
-    weight_ptr = get_tensor_ptr(*weight);
-  }
-  CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
-  if (bias) {
-    bias_ptr = get_tensor_ptr(*bias);
-  }
-  auto run_stream = y.stream();
-"""
-    + tune_and_invoke_part
-    + """
-    return {y};
-}
-
-PD_BUILD_OP(${op_name})
-    .Inputs({"x", paddle::Optional("weight"), paddle::Optional("bias")})
-    .Outputs({"y"})
-    .Attrs({"epsilon: float"})
-"""
-)
 
 
 def rms_norm(x, weight=None, bias=None, epsilon=1e-5):
@@ -1275,13 +1155,10 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-5):
     N = x.shape[3]
     N_npo2 = triton.next_power_of_2(N)
 
-    input_and_attr = get_cpp_input_from_python_api(rms_norm)
-    compute_attr_for_triton_kernel = "int M = x.dims()[0] * x.dims()[1] * x.dims()[2];\n"
-    compute_attr_for_triton_kernel += "int N = x.dims()[3];\n"
-    template_used = SubstituteTemplate(
-        rms_norm_template,
-        {"input_and_attr": input_and_attr, "compute_attr_for_triton_kernel": compute_attr_for_triton_kernel},
-    )
+    prepare_attr_for_triton_kernel = """
+    int M = x.dims()[0] * x.dims()[1] * x.dims()[2];
+    int N = x.dims()[3];
+    """
 
     op_name = "triton_rms_norm"
     op_name += get_dtype_str(x.dtype)
@@ -1295,6 +1172,21 @@ def rms_norm(x, weight=None, bias=None, epsilon=1e-5):
 
     if op_name not in OpProtoHolder.instance().op_proto_map.keys():
         y = paddle.empty_like(x)
+        prepare_ptr_for_triton_kernel = """
+        auto y = paddle::empty(x.shape(), x.dtype(), x.place());
+        auto x_ptr = get_tensor_ptr(x);
+        auto y_ptr = get_tensor_ptr(y);
+        CUdeviceptr weight_ptr = (CUdeviceptr)(nullptr);
+        if (weight) weight_ptr = get_tensor_ptr(*weight);
+        CUdeviceptr bias_ptr = (CUdeviceptr)(nullptr);
+        if (bias) bias_ptr = get_tensor_ptr(*bias);
+        """
+        return_tensor_names = "y"
+
+        template_used = rendering_common_template(
+            rms_norm, prepare_attr_for_triton_kernel, prepare_ptr_for_triton_kernel, return_tensor_names
+        )
+
         grid = ("((M+BLOCK_SIZE_M-1)/BLOCK_SIZE_M)",)
         rms_norm_kernel[(op_name, template_used, grid, rms_norm_kernel_config)](
             x_ptr=x,
@@ -1584,64 +1476,6 @@ def fused_rotary_emb(
         return q_out, k_out, v_out
 
 
-########################### split concat ###############################
-split_concat_template = (
-    """
-std::vector<paddle::Tensor> ${op_name}_func(
-    const paddle::Tensor &x,
-    const paddle::Tensor &y) {
-
-  int batch = x.dims()[0];
-  
-  int seq_qkv = x.dims()[1];
-  int seq_eqkv = y.dims()[1];
-  int output_hidden = x.dims()[2] / 3;
-  
-  auto qkv = get_tensor_ptr(x);
-  auto eqkv = get_tensor_ptr(y);
-  
-  auto out0_tensor = paddle::empty({batch, seq_qkv+seq_eqkv, output_hidden}, x.dtype(), x.place());
-  auto out1_tensor = paddle::empty({batch, seq_qkv+seq_eqkv, output_hidden}, x.dtype(), x.place());
-  auto out2_tensor = paddle::empty({batch, seq_qkv+seq_eqkv, output_hidden}, x.dtype(), x.place());
-  
-  auto out0 = get_tensor_ptr(out0_tensor);
-  auto out1 = get_tensor_ptr(out1_tensor);
-  auto out2 = get_tensor_ptr(out2_tensor);
-  
-  
-  auto  run_stream = out0_tensor.stream();
-  
-"""
-    + tune_and_invoke_part
-    + """
-    return {out0_tensor, out1_tensor, out2_tensor};
-}
-
-std::vector<std::vector<int64_t>> ${op_name}_InferShape(
-        const std::vector<int64_t>& A_shape, const std::vector<int64_t>& B_shape) {
-  
-  int64_t seq1 = A_shape[1];
-  int64_t seq2 = B_shape[1];
-  int64_t seq = -1;
-  if (seq1 > 0 && seq2 > 0){
-    seq = seq1 + seq2;
-  }
-  std::vector<int64_t> out_shape = {A_shape[0], seq, A_shape[2]/3};
-  
-  return {out_shape, out_shape, out_shape};
-}
-
-std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {
-    return {A_dtype, A_dtype, A_dtype};
-}
-
-PD_BUILD_OP(${op_name})
-    .Inputs({"x", "y"})
-    .Outputs({"out0_tensor", "out1_tensor", "out2_tensor"})
-"""
-)
-
-
 @paddle_use_triton(
     key=["1"],
 )
@@ -1685,6 +1519,28 @@ def split_concat_kernel(
     tl.store(write_ptr, read_data, mask=mask)
 
 
+########################### split concat ###############################
+d2s_split_concat_infer_shape_dtype = """
+std::vector<std::vector<int64_t>> ${op_name}_InferShape(
+        const std::vector<int64_t>& A_shape, const std::vector<int64_t>& B_shape) {
+  
+  int64_t seq1 = A_shape[1];
+  int64_t seq2 = B_shape[1];
+  int64_t seq = -1;
+  if (seq1 > 0 && seq2 > 0){
+    seq = seq1 + seq2;
+  }
+  std::vector<int64_t> out_shape = {A_shape[0], seq, A_shape[2]/3};
+  
+  return {out_shape, out_shape, out_shape};
+}
+
+std::vector<paddle::DataType> ${op_name}_InferDtype(const paddle::DataType& A_dtype) {
+    return {A_dtype, A_dtype, A_dtype};
+}
+"""
+
+
 def split_concat(x, y):
     assert len(x.shape) == 3
     assert len(y.shape) == 3
@@ -1706,6 +1562,15 @@ def split_concat(x, y):
     hidd_x = x.shape[2]
     seq_eqkv = y.shape[1]
     ouput_hidden = hidd_x // 3
+
+    prepare_attr_for_triton_kernel = """
+    int batch = x.dims()[0];
+    int seq_qkv = x.dims()[1];
+    int hidd_x = x.dims()[2];
+    int seq_eqkv = y.dims()[1];
+    int output_hidden = hidd_x / 3;
+    """
+
     BLOCK_SIZE = triton.next_power_of_2(ouput_hidden)
     op_name = "split_concat"
     op_name += get_dtype_str(x.dtype)
@@ -1715,10 +1580,40 @@ def split_concat(x, y):
         out0 = paddle.empty(shape=[batch, seq_qkv + seq_eqkv, ouput_hidden], dtype=x.dtype)
         out1 = paddle.empty(shape=[batch, seq_qkv + seq_eqkv, ouput_hidden], dtype=x.dtype)
         out2 = paddle.empty(shape=[batch, seq_qkv + seq_eqkv, ouput_hidden], dtype=x.dtype)
+
+        prepare_ptr_for_triton_kernel = """
+        auto out0_tensor = paddle::empty({batch, seq_qkv+seq_eqkv, output_hidden}, x.dtype(), x.place());
+        auto out1_tensor = paddle::empty({batch, seq_qkv+seq_eqkv, output_hidden}, x.dtype(), x.place());
+        auto out2_tensor = paddle::empty({batch, seq_qkv+seq_eqkv, output_hidden}, x.dtype(), x.place());
+        auto qkv = get_tensor_ptr(x);
+        auto eqkv = get_tensor_ptr(y);
+        auto out0 = get_tensor_ptr(out0_tensor);
+        auto out1 = get_tensor_ptr(out1_tensor);
+        auto out2 = get_tensor_ptr(out2_tensor);
+        """
+        return_tensor_names = "out0_tensor,out1_tensor,out2_tensor"
+
+        template_used = rendering_common_template(
+            split_concat,
+            prepare_attr_for_triton_kernel,
+            prepare_ptr_for_triton_kernel,
+            return_tensor_names,
+            d2s_split_concat_infer_shape_dtype,
+        )
+
         grid = ("3", "batch", "seq_qkv + seq_eqkv")
         # -1 means this value does not matter for triton compilation
-        split_concat_kernel[(op_name, split_concat_template, grid)](
-            out0, out1, out2, x, y, -1, seq_qkv, seq_eqkv, ouput_hidden, BLOCK_SIZE=BLOCK_SIZE  # batch,
+        split_concat_kernel[(op_name, template_used, grid)](
+            out0=out0,
+            out1=out1,
+            out2=out2,
+            qkv=x,
+            eqkv=y,
+            batch=-1,
+            seq_qkv=seq_qkv,
+            seq_eqkv=seq_eqkv,
+            output_hidden=ouput_hidden,
+            BLOCK_SIZE=BLOCK_SIZE,
         )
 
     if in_dynamic_or_pir_mode():
