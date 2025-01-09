@@ -21,7 +21,6 @@ from paddle.base.layer_helper import LayerHelper
 from paddle.framework import in_dynamic_or_pir_mode
 
 from .triton_utils import (
-    get_dtype_str,
     get_op_name_with_suffix,
     paddle_use_triton,
     rendering_common_template,
@@ -30,13 +29,11 @@ from .triton_utils import (
 
 def get_wint8_kernel_config():
     configs = []
-    for num_stages in [3]:
-        for block_m in [32]:
-            for block_n in [64]:
-                for block_k in [128]:
-                    for split_k in [
-                        1,
-                    ]:
+    for num_stages in [2, 3, 4, 5, 6]:
+        for block_m in [16, 32, 64, 128]:
+            for block_n in [64, 128, 256]:
+                for block_k in [64, 128, 256]:
+                    for split_k in [1, 2, 4, 8]:
                         num_warps = 4
                         if block_m * block_n >= 128 * 256:
                             num_warps = 8
@@ -290,6 +287,10 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
         N = qweight.shape[1]
         stride_bk = N
         stride_bn = 1
+    stride_am = K
+    stride_ak = 1  # A always is rowmajor
+    stride_cm = N
+    stride_cn = 1  # C always is rowmajor
 
     prepare_attr_for_triton_kernel = """
     int M = x.dims()[0];
@@ -304,7 +305,7 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
         stride_bn = K;
     } else {
         N = qweight.dims()[1];
-        stride_bk = K;
+        stride_bk = N;
         stride_bn = 1;
     }
 
@@ -332,7 +333,6 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
 
         prepare_ptr_for_triton_kernel = """
         auto output = paddle::empty({M,N}, x.dtype(), x.place());
-
         auto a_ptr = get_tensor_ptr(x);
         auto b_ptr = get_tensor_ptr(qweight);
         auto c_ptr = get_tensor_ptr(output);
@@ -360,12 +360,12 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
             M=M,
             N=N,
             K=K,
-            stride_am=K,
-            stride_ak=1,  # A always is rowmajor
+            stride_am=stride_am,
+            stride_ak=stride_ak,
             stride_bk=stride_bk,
             stride_bn=stride_bn,
-            stride_cm=N,
-            stride_cn=1,  # C always is rowmajor
+            stride_cm=stride_cm,
+            stride_cn=stride_cn,
         )
 
     if in_dynamic_or_pir_mode():
