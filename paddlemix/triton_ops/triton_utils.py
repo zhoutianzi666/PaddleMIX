@@ -316,7 +316,7 @@ tune_and_invoke_part = """
             }
 
             auto flush_l2_cache = paddle::full(
-                {10 * 1024 * 1024}, 0, paddle::DataType::INT32, x.place());
+                {10 * 1024 * 1024}, 0, paddle::DataType::INT32, ${arbitary_output_name}.place());
             // std::cout << &flush_l2_cache  << std::endl;
             // this is used when out is need to be reset to zero, such as split-k gemm.
             ${reset_zero_when_tune};
