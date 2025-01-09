@@ -603,6 +603,7 @@ def fused_adaLN_scale_residual(
             gate_msa_ptr=gate_msa,
             scale_mlp_ptr=scale_mlp,
             shift_mlp_ptr=shift_mlp,
+            # weight_ptr and bias_ptr may be None, so use shift_mlp.
             weight_ptr=shift_mlp,
             bias_ptr=shift_mlp,
             resi_out_ptr=resi_out,
