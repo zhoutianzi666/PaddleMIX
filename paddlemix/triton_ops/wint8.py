@@ -51,7 +51,7 @@ def get_wint8_kernel_config():
     return configs
 
 
-d2s_code = """
+d2s_infer_code = """
 std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& a_shape,
                                                         const std::vector<int64_t>& b_shape,
                                                         const std::vector<int64_t>& c_shape,
@@ -347,7 +347,7 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
             prepare_attr_for_triton_kernel,
             prepare_ptr_for_triton_kernel,
             return_tensor_names,
-            d2s_code,
+            d2s_infer_code,
         )
 
         grid = (
