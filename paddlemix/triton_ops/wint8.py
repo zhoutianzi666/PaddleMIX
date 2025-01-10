@@ -29,21 +29,11 @@ from .triton_utils import (
 
 def get_wint8_kernel_config():
     configs = []
-    for num_stages in [
-        2,
-    ]:
-        for block_m in [
-            16,
-        ]:
-            for block_n in [
-                64,
-            ]:
-                for block_k in [
-                    64,
-                ]:
-                    for split_k in [
-                        1,
-                    ]:
+    for num_stages in [2, 3, 4, 5, 6]:
+        for block_m in [16, 32, 64, 128]:
+            for block_n in [64, 128, 256]:
+                for block_k in [64, 128, 256]:
+                    for split_k in [1, 2, 4, 8]:
                         num_warps = 4
                         if block_m * block_n >= 128 * 256:
                             num_warps = 8
