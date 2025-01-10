@@ -15,7 +15,7 @@
 __all__ = []
 
 try:
-    from .rms_norm_demo import rms_norm
+    from .rms_norm import rms_norm
     from .triton_ops import (
         adaptive_layer_norm,
         fused_adaLN_scale_residual,
