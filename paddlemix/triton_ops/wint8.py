@@ -29,11 +29,21 @@ from .triton_utils import (
 
 def get_wint8_kernel_config():
     configs = []
-    for num_stages in [2, 3, 4, 5, 6]:
-        for block_m in [16, 32, 64, 128]:
-            for block_n in [64, 128, 256]:
-                for block_k in [64, 128, 256]:
-                    for split_k in [1, 2, 4, 8]:
+    for num_stages in [
+        2,
+    ]:
+        for block_m in [
+            16,
+        ]:
+            for block_n in [
+                64,
+            ]:
+                for block_k in [
+                    64,
+                ]:
+                    for split_k in [
+                        1,
+                    ]:
                         num_warps = 4
                         if block_m * block_n >= 128 * 256:
                             num_warps = 8
@@ -51,7 +61,7 @@ def get_wint8_kernel_config():
     return configs
 
 
-triton_wint8_template = """
+d2s_code = """
 std::vector<std::vector<int64_t>> ${op_name}_InferShape(const std::vector<int64_t>& a_shape,
                                                         const std::vector<int64_t>& b_shape,
                                                         const std::vector<int64_t>& c_shape,
@@ -332,7 +342,7 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
         output = paddle.zeros((M, N), dtype=x.dtype)
 
         prepare_ptr_for_triton_kernel = """
-        auto output = paddle::empty({M,N}, x.dtype(), x.place());
+        auto output = paddle::full({M,N}, 0, x.dtype(), x.place());
         auto a_ptr = get_tensor_ptr(x);
         auto b_ptr = get_tensor_ptr(qweight);
         auto c_ptr = get_tensor_ptr(output);
@@ -343,7 +353,11 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
 
         return_tensor_names = "output"
         template_used = rendering_common_template(
-            weight_only_int8, prepare_attr_for_triton_kernel, prepare_ptr_for_triton_kernel, return_tensor_names
+            weight_only_int8,
+            prepare_attr_for_triton_kernel,
+            prepare_ptr_for_triton_kernel,
+            return_tensor_names,
+            d2s_code,
         )
 
         grid = (
