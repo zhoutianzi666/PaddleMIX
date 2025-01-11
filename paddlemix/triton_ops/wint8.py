@@ -377,7 +377,6 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
         return outs[0]
     else:
         helper = LayerHelper(op_name, **locals())
-        output = helper.create_variable_for_type_inference(dtype=x.dtype)
 
         inputs = {
             "x": x,
@@ -385,7 +384,8 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
             "scales": scales,
             "bias@OPTIONAL": bias,
         }
-        attrs = ({"bool_trans_w": bool_trans_w},)
+        attrs = {"bool_trans_w": bool_trans_w}
+        output = helper.create_variable_for_type_inference(dtype=x.dtype)
         outputs = {"output": output}
 
         helper.append_op(
