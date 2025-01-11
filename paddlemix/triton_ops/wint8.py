@@ -394,4 +394,4 @@ def weight_only_int8(x, qweight, scales, bias=None, bool_trans_w=True):
             attrs=attrs,
             outputs=outputs,
         )
-        return out
+        return output
