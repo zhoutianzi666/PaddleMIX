@@ -32,6 +32,7 @@ try:
         tune_and_invoke_part,
     )
     from .wint8 import weight_only_int8
+    from .sageattn import sageattn_qk_int8_pv_fp16_triton
 
     __all__ += [
         "paddle_custom_op_head_part",
@@ -47,6 +48,7 @@ try:
         "fused_rotary_emb",
         "split_concat",
         "triton_split",
+        "sageattn_qk_int8_pv_fp16_triton"
     ]
 except:
     pass
