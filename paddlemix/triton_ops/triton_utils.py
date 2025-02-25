@@ -194,10 +194,16 @@ def get_value_hint(x):
 def get_dtype_str(dtype):
     if dtype == paddle.float16:
         return "_fp16"
+    if dtype == paddle.float8_e4m3fn:
+        return "_float8_e4m3fn"
     elif dtype == paddle.uint8:
         return "_u8"
     elif dtype == paddle.int8:
         return "_i8"
+    elif dtype == paddle.int32:
+        return "_i32"
+    elif dtype == paddle.int64:
+        return "_i64"
     elif dtype == paddle.float32:
         return "_fp32"
     elif dtype == paddle.bfloat16:
@@ -251,6 +257,12 @@ def get_pointer_hint(dtypes):
             hint += "*bf16:16,"
         elif ele == paddle.int32:
             hint += "*i32:16,"
+        elif ele == paddle.int64:
+            hint += "*i64,"
+        elif ele == paddle.float8_e4m3fn:
+            hint += "*fp8e4nv:16,"
+        else:
+            assert False, "Not support this dtype."
     return hint
 
 
@@ -274,6 +286,12 @@ CUdeviceptr get_tensor_ptr(const paddle::Tensor& input){
     return (CUdeviceptr)(input.data<uint8_t>());
   } else if (input.type() == paddle::DataType::INT8) {
     return (CUdeviceptr)(input.data<int8_t>());
+  } else if (input.type() == paddle::DataType::INT64) {
+    return (CUdeviceptr)(input.data<int64_t>());
+  } else if (input.type() == paddle::DataType::INT32) {
+    return (CUdeviceptr)(input.data<int32_t>());
+  } else if (input.type() == paddle::DataType::FLOAT8_E4M3FN) {
+    return (CUdeviceptr)(input.data<phi::dtype::float8_e4m3fn>());
   } else {
     assert(false);
     return (CUdeviceptr)(nullptr);
@@ -293,6 +311,8 @@ tune_and_invoke_part = """
                                                ${triton_kernel_args},
                                                algo_id);
   };
+
+  map_problem_${op_name}[problem_size] = 0;
 
   if (!map_problem_${op_name}.count(problem_size)) {
     std::cout << "we are tuning for ${op_name} which key is: {";
@@ -394,7 +414,7 @@ def rendering_common_template(
     func,
     prepare_attr_for_triton_kernel,
     prepare_ptr_for_triton_kernel,
-    return_tensor_names,
+    return_tensor_names=None,
     d2s_infer_code="",
 ):
     signature = inspect.signature(func)
@@ -403,6 +423,11 @@ def rendering_common_template(
     input_and_attr = ""
     paddle_input_sig = ""
     paddle_attr_sig = ""
+
+    if return_tensor_names is None:
+        return_tensor_names = "useless"
+        prepare_ptr_for_triton_kernel += "auto useless = paddle::empty({1}, paddle::DataType::INT32, paddle::GPUPlace());"
+
 
     for i in range(len(arg_names)):
         if arg_defaults[i] == None:
@@ -420,6 +445,8 @@ def rendering_common_template(
         elif type(arg_defaults[i]) == str:
             input_and_attr += f"std::string {arg_names[i]},"
             paddle_attr_sig += f""""{arg_names[i]}: std::string","""
+        elif arg_names[i] == "config":
+            continue
         else:
             input_and_attr += f"const paddle::Tensor & {arg_names[i]},"
             paddle_input_sig += f""""{arg_names[i]}","""
@@ -539,7 +566,11 @@ class KernelInterface:
                             f"We find {i}, {j} in tl.constexpr args, and {j} is a substring of {i}, please modify your triton kernel arguments names to avoid this."
                         )
 
+            modified_arg_exclude_constexpr = self.arg_exclude_constexpr
             const_hint_dict = {}
+            
+            print(all_input)
+
             for i in range(len(all_input)):
                 ele = all_input[i]
                 if (
@@ -550,6 +581,7 @@ class KernelInterface:
                     or type(ele) == paddle.base.libpaddle.pir.Value
                 ):
                     dtypes.append(ele.dtype)
+                    modified_arg_exclude_constexpr[i] = f"input_ptrs[{i}]"
                 elif i in self.constexprs:
                     const_hint_dict[self.arg_names[i]] = ele
                 else:
@@ -591,7 +623,7 @@ class KernelInterface:
             lanuch_grid = ",".join(lanuch_grid)
 
             op_dict = {"op_name": op_name, "reset_zero_when_tune": ""}
-            op_dict["triton_kernel_args"] = ",".join(self.arg_exclude_constexpr)
+            op_dict["triton_kernel_args"] = ",".join(modified_arg_exclude_constexpr)
             op_dict["key"] = ",".join(self.key_args)
             # when tunning, we need to reset the out to zero.
             if "reset_zero_when_tune" in other_config.keys():
@@ -631,7 +663,11 @@ class KernelInterface:
                             if key not in config.keys():
                                 config[key] = const_hint_dict[key]
                             else:
-                                raise ValueError(f"you specify {key} both in arguments and config, this is wrong.")
+                                if config[key] == const_hint_dict[key]:
+                                    pass
+                                else:
+                                    message = f"you specify {key} both in arguments and config, and they are not same, this is wrong."
+                                    raise ValueError(message)
                         else:
                             assert key in config.keys(), f"you must specify {key} in your config."
                     if "num_warps" not in config.keys():

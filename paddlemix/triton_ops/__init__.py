@@ -30,6 +30,7 @@ try:
         get_dtype_str,
         paddle_custom_op_head_part,
         tune_and_invoke_part,
+        rendering_common_template,
     )
     from .wint8 import weight_only_int8
     from .sageattn import sageattn_qk_int8_pv_fp16_triton
@@ -48,7 +49,8 @@ try:
         "fused_rotary_emb",
         "split_concat",
         "triton_split",
-        "sageattn_qk_int8_pv_fp16_triton"
+        "sageattn_qk_int8_pv_fp16_triton",
+        "rendering_common_template",
     ]
 except:
     pass
